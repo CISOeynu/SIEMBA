@@ -24,17 +24,17 @@ SIEMBA combines enterprise SIEM log collection with active SOC tooling in a sing
 
 ### Ubuntu 22.04 / 24.04 — Full Native
 ```bash
-curl -fsSL https://raw.githubusercontent.com/YOUR_ORG/siemba/main/scripts/install.sh | sudo bash -s -- --mode=full
+curl -fsSL https://raw.githubusercontent.com/CISOeynu/siemba/main/scripts/install.sh | sudo bash -s -- --mode=full
 ```
 
 ### Ubuntu / macOS — Docker
 ```bash
-curl -fsSL https://raw.githubusercontent.com/YOUR_ORG/siemba/main/scripts/install.sh | sudo bash -s -- --mode=docker
+curl -fsSL https://raw.githubusercontent.com/CISOeynu/siemba/main/scripts/install.sh | sudo bash -s -- --mode=docker
 ```
 
 ### macOS — Full Native
 ```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/YOUR_ORG/siemba/main/scripts/install.sh)" -- --mode=full
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/CISOeynu/siemba/main/scripts/install.sh)" -- --mode=full
 ```
 
 After install open: **https://your-domain-or-ip**
