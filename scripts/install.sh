@@ -56,6 +56,7 @@ cat << 'BANNER'
    ╚══════╝╚═╝╚══════╝╚═╝     ╚═╝╚═════╝ ╚═╝  ╚═╝
 BANNER
 echo -e "${NC}   Security Intelligence & Event Management Battle Armor"
+echo -e "${NC}   By Roy Coren(Cisoeynu.com) & Claude Code"
 echo -e "   v${SIEMBA_VERSION}  |  log: ${LOG_FILE}"
 echo ""
 }
