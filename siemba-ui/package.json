@@ -1,0 +1,44 @@
+{
+  "name": "siemba-ui",
+  "version": "1.0.0",
+  "description": "SIEMBA Security Intelligence & Event Management Battle Armor — Web UI",
+  "type": "module",
+  "scripts": {
+    "dev":   "concurrently \"node src/server/server.js\" \"vite\"",
+    "build": "vite build",
+    "start": "node src/server/server.js",
+    "test":  "vitest run"
+  },
+  "dependencies": {
+    "axios":           "^1.6.0",
+    "bcryptjs":        "^2.4.3",
+    "body-parser":     "^1.20.2",
+    "compression":     "^1.7.4",
+    "cors":            "^2.8.5",
+    "dotenv":          "^16.3.1",
+    "express":         "^4.18.2",
+    "express-rate-limit": "^7.1.5",
+    "helmet":          "^7.1.0",
+    "jsonwebtoken":    "^9.0.2",
+    "multer":          "^1.4.5-lts.1",
+    "node-cron":       "^3.0.3",
+    "uuid":            "^9.0.1",
+    "winston":         "^3.11.0",
+    "ws":              "^8.16.0",
+    "@elastic/elasticsearch": "^8.11.0",
+    "msal-node":       "^2.6.4",
+    "googleapis":      "^140.0.0",
+    "node-fetch":      "^3.3.2",
+    "yaml":            "^2.3.4"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.2.1",
+    "concurrently":         "^8.2.2",
+    "react":                "^18.2.0",
+    "react-dom":            "^18.2.0",
+    "react-router-dom":     "^6.21.1",
+    "recharts":             "^2.10.3",
+    "vite":                 "^5.0.10",
+    "vitest":               "^1.1.0"
+  }
+}

@@ -1,0 +1,72 @@
+apiVersion: 1
+
+datasources:
+  - name: SIEMBA-Elasticsearch
+    type: elasticsearch
+    uid: siemba-es
+    url: http://elasticsearch:9200
+    access: proxy
+    isDefault: true
+    jsonData:
+      index: "siemba-*"
+      timeField: "@timestamp"
+      esVersion: "8.13.0"
+      logMessageField: message
+      logLevelField: siemba_severity
+      includeFrozen: false
+    editable: false
+
+  - name: SIEMBA-Syslog
+    type: elasticsearch
+    uid: siemba-syslog
+    url: http://elasticsearch:9200
+    access: proxy
+    jsonData:
+      index: "siemba-syslog-*"
+      timeField: "@timestamp"
+      esVersion: "8.13.0"
+    editable: false
+
+  - name: SIEMBA-M365
+    type: elasticsearch
+    uid: siemba-m365
+    url: http://elasticsearch:9200
+    access: proxy
+    jsonData:
+      index: "siemba-m365-*"
+      timeField: "@timestamp"
+      esVersion: "8.13.0"
+    editable: false
+
+  - name: SIEMBA-Azure
+    type: elasticsearch
+    uid: siemba-azure
+    url: http://elasticsearch:9200
+    access: proxy
+    jsonData:
+      index: "siemba-azure-*"
+      timeField: "@timestamp"
+      esVersion: "8.13.0"
+    editable: false
+
+  - name: SIEMBA-Google
+    type: elasticsearch
+    uid: siemba-google
+    url: http://elasticsearch:9200
+    access: proxy
+    jsonData:
+      index: "siemba-google-*"
+      timeField: "@timestamp"
+      esVersion: "8.13.0"
+    editable: false
+
+  - name: SIEMBA-ThreatIntel
+    type: elasticsearch
+    uid: siemba-ti
+    url: http://elasticsearch:9200
+    access: proxy
+    jsonData:
+      index: "siemba-ti-hits-*"
+      timeField: "@timestamp"
+      esVersion: "8.13.0"
+    editable: false

@@ -1,0 +1,26 @@
+{
+  "title": "SIEMBA — Azure AD",
+  "uid": "siemba-azure",
+  "tags": ["siemba","azure"],
+  "timezone": "browser",
+  "schemaVersion": 36,
+  "refresh": "60s",
+  "time": {"from":"now-24h","to":"now"},
+  "panels": [
+    {"id":1,"gridPos":{"x":0,"y":0,"w":4,"h":4},"type":"stat","title":"Sign-In Events",
+     "datasource":{"type":"elasticsearch","uid":"siemba-azure"},
+     "targets":[{"query":"category:SignInLogs","metrics":[{"type":"count","id":"1"}],"bucketAggs":[]}]},
+    {"id":2,"gridPos":{"x":4,"y":0,"w":4,"h":4},"type":"stat","title":"Failed Sign-Ins",
+     "datasource":{"type":"elasticsearch","uid":"siemba-azure"},
+     "targets":[{"query":"category:SignInLogs AND NOT resultType:0","metrics":[{"type":"count","id":"1"}],"bucketAggs":[]}]},
+    {"id":3,"gridPos":{"x":8,"y":0,"w":4,"h":4},"type":"stat","title":"High Risk Sign-Ins",
+     "datasource":{"type":"elasticsearch","uid":"siemba-azure"},
+     "targets":[{"query":"riskLevelDuringSignIn:(high OR medium)","metrics":[{"type":"count","id":"1"}],"bucketAggs":[]}]},
+    {"id":4,"gridPos":{"x":0,"y":4,"w":24,"h":8},"type":"timeseries","title":"Azure AD Events Over Time",
+     "datasource":{"type":"elasticsearch","uid":"siemba-azure"},
+     "targets":[{"query":"*","metrics":[{"type":"count","id":"1"}],"bucketAggs":[{"type":"date_histogram","field":"@timestamp","id":"2","settings":{"interval":"auto"}}]}]},
+    {"id":5,"gridPos":{"x":0,"y":12,"w":24,"h":10},"type":"table","title":"Recent Azure AD Events",
+     "datasource":{"type":"elasticsearch","uid":"siemba-azure"},
+     "targets":[{"query":"siemba_severity:(critical OR high)","metrics":[{"type":"logs","id":"1"}],"bucketAggs":[]}]}
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "title": "SIEMBA — Microsoft 365",
+  "uid": "siemba-m365",
+  "tags": ["siemba","m365"],
+  "timezone": "browser",
+  "schemaVersion": 36,
+  "refresh": "60s",
+  "time": {"from":"now-24h","to":"now"},
+  "panels": [
+    {"id":1,"gridPos":{"x":0,"y":0,"w":4,"h":4},"type":"stat","title":"Total M365 Events",
+     "datasource":{"type":"elasticsearch","uid":"siemba-m365"},
+     "targets":[{"query":"*","metrics":[{"type":"count","id":"1"}],"bucketAggs":[]}]},
+    {"id":2,"gridPos":{"x":4,"y":0,"w":4,"h":4},"type":"stat","title":"Failed Logins",
+     "datasource":{"type":"elasticsearch","uid":"siemba-m365"},
+     "targets":[{"query":"Operation:UserLoginFailed","metrics":[{"type":"count","id":"1"}],"bucketAggs":[]}]},
+    {"id":3,"gridPos":{"x":8,"y":0,"w":4,"h":4},"type":"stat","title":"Critical Alerts",
+     "datasource":{"type":"elasticsearch","uid":"siemba-m365"},
+     "targets":[{"query":"siemba_severity:critical","metrics":[{"type":"count","id":"1"}],"bucketAggs":[]}]},
+    {"id":4,"gridPos":{"x":0,"y":4,"w":24,"h":8},"type":"timeseries","title":"M365 Events Over Time",
+     "datasource":{"type":"elasticsearch","uid":"siemba-m365"},
+     "targets":[{"query":"*","metrics":[{"type":"count","id":"1"}],"bucketAggs":[{"type":"date_histogram","field":"@timestamp","id":"2","settings":{"interval":"auto"}}]}]},
+    {"id":5,"gridPos":{"x":0,"y":12,"w":12,"h":10},"type":"table","title":"Recent Sign-In Events",
+     "datasource":{"type":"elasticsearch","uid":"siemba-m365"},
+     "targets":[{"query":"Operation:UserLoggedIn OR Operation:UserLoginFailed","metrics":[{"type":"logs","id":"1"}],"bucketAggs":[]}]},
+    {"id":6,"gridPos":{"x":12,"y":12,"w":12,"h":10},"type":"table","title":"Admin Operations",
+     "datasource":{"type":"elasticsearch","uid":"siemba-m365"},
+     "targets":[{"query":"siemba_severity:(high OR critical)","metrics":[{"type":"logs","id":"1"}],"bucketAggs":[]}]}
+  ]
+}

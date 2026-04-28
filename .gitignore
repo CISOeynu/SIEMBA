@@ -1,0 +1,38 @@
+# Secrets — never commit
+.env
+siemba-ui/.env
+*.key
+*.pem
+config/ssl/
+credentials.json
+*service-account*.json
+
+# Node
+node_modules/
+siemba-ui/node_modules/
+dist/
+build/
+
+# Data
+data/
+esdata/
+logs/
+
+# Threat intel uploads
+config/threat-intel/*.txt
+config/threat-intel/*.json
+!config/threat-intel/.gitkeep
+
+# Tool output
+tool-results/
+nuclei-output/
+sniper-output/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp

@@ -1,0 +1,26 @@
+{
+  "title": "SIEMBA — Syslog",
+  "uid": "siemba-syslog",
+  "tags": ["siemba","syslog"],
+  "timezone": "browser",
+  "schemaVersion": 36,
+  "refresh": "30s",
+  "time": {"from":"now-24h","to":"now"},
+  "panels": [
+    {"id":1,"gridPos":{"x":0,"y":0,"w":4,"h":4},"type":"stat","title":"Total Syslog Events",
+     "datasource":{"type":"elasticsearch","uid":"siemba-syslog"},
+     "targets":[{"query":"*","metrics":[{"type":"count","id":"1"}],"bucketAggs":[]}]},
+    {"id":2,"gridPos":{"x":4,"y":0,"w":4,"h":4},"type":"stat","title":"Critical Severity",
+     "datasource":{"type":"elasticsearch","uid":"siemba-syslog"},
+     "targets":[{"query":"siemba_severity:critical","metrics":[{"type":"count","id":"1"}],"bucketAggs":[]}]},
+    {"id":3,"gridPos":{"x":0,"y":4,"w":24,"h":8},"type":"timeseries","title":"Syslog Events Over Time",
+     "datasource":{"type":"elasticsearch","uid":"siemba-syslog"},
+     "targets":[{"query":"*","metrics":[{"type":"count","id":"1"}],"bucketAggs":[{"type":"date_histogram","field":"@timestamp","id":"2","settings":{"interval":"auto"}}]}]},
+    {"id":4,"gridPos":{"x":0,"y":12,"w":12,"h":8},"type":"table","title":"Top Source Hosts",
+     "datasource":{"type":"elasticsearch","uid":"siemba-syslog"},
+     "targets":[{"query":"*","metrics":[{"type":"count","id":"1"}],"bucketAggs":[{"type":"terms","field":"syslog_hostname.keyword","id":"2","settings":{"size":"20"}}]}]},
+    {"id":5,"gridPos":{"x":12,"y":12,"w":12,"h":8},"type":"table","title":"Top Programs",
+     "datasource":{"type":"elasticsearch","uid":"siemba-syslog"},
+     "targets":[{"query":"*","metrics":[{"type":"count","id":"1"}],"bucketAggs":[{"type":"terms","field":"syslog_program.keyword","id":"2","settings":{"size":"20"}}]}]}
+  ]
+}

@@ -1,0 +1,21 @@
+server.host: "127.0.0.1"
+server.port: 5601
+server.name: "siemba-kibana"
+server.basePath: "/kibana"
+server.rewriteBasePath: true
+
+elasticsearch.hosts: ["http://127.0.0.1:9200"]
+
+xpack.security.enabled: false
+xpack.encryptedSavedObjects.encryptionKey: "siemba-kibana-enc-key-32-chars-x"
+
+logging:
+  appenders:
+    file:
+      type: file
+      fileName: /var/log/kibana/kibana.log
+      layout:
+        type: json
+  root:
+    appenders: [default, file]
+    level: warn
