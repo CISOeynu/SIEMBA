@@ -40,7 +40,7 @@ banner() {
    ╚══════╝╚═╝╚══════╝╚═╝     ╚═╝╚═════╝ ╚═╝  ╚═╝
 BANNER
   echo -e "   Security Intelligence & Event Management Battle Armor"
-  echo -e "   By Roy Coren (Cisoeynu.com)" & Claude Code
+  echo -e "   By Roy Coren (Cisoeynu.com) & Claude Code"
   echo -e "   v${SIEMBA_VERSION}  |  log: ${LOG_FILE}\n"
 }
 
