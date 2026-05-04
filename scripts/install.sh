@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
 # =============================================================================
-# SIEMBA Installer v1.0.6-hotfix
+# SIEMBA Installer v1.0.7-hotfix
 # Supported: Ubuntu/Debian systemd hosts
-# Focus: robust Elasticsearch bring-up on 12GB hosts + status reporting
+# Fixes:
+#   - Explicit per-section OK/FAILURE/ERROR status lines
+#   - Cleans stale Elasticsearch security autoconfiguration keystore entries
+#   - Forces path.data/path.logs outside $ES_HOME
+#   - Explicitly disables xpack security + transport/http SSL for local test installs
+#   - Applies vm.max_map_count immediately and persistently
 # =============================================================================
 
 set -Eeuo pipefail
 shopt -s lastpipe
 
-SIEMBA_VERSION="1.0.6-hotfix"
+SIEMBA_VERSION="1.0.7-hotfix"
 INSTALL_DIR="/opt/siemba"
 LOG_FILE="/tmp/siemba-install.log"
 MODE="full"
@@ -20,8 +25,6 @@ ES_VERSION_SERIES="8.x"
 ES_HEAP_GB=""
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; BOLD='\033[1m'; NC='\033[0m'
-
-# Section status tracking
 SECTIONS=()
 declare -A STATUS
 
@@ -32,8 +35,8 @@ err()  { echo -e "$(ts) ${RED}[ERROR]${NC} $*" | tee -a "$LOG_FILE"; exit 1; }
 q()    { "$@" >> "$LOG_FILE" 2>&1; }
 
 register_section() { local s="$1"; SECTIONS+=("$s"); STATUS["$s"]="PENDING"; }
-status_ok() { local s="$1"; STATUS["$s"]="OK"; echo -e "${GREEN}[OK]${NC} ${s}" | tee -a "$LOG_FILE"; }
-status_fail() { local s="$1"; shift || true; STATUS["$s"]="FAILED${*:+ - $*}"; echo -e "${RED}[FAILURE]${NC} ${s}${*:+ - $*}" | tee -a "$LOG_FILE"; }
+status_ok()    { local s="$1"; STATUS["$s"]="OK"; echo -e "${GREEN}[OK]${NC} ${s}" | tee -a "$LOG_FILE"; }
+status_fail()  { local s="$1"; shift || true; STATUS["$s"]="FAILED${*:+ - $*}"; echo -e "${RED}[FAILURE]${NC} ${s}${*:+ - $*}" | tee -a "$LOG_FILE"; }
 status_error() { local s="$1"; shift || true; STATUS["$s"]="ERROR${*:+ - $*}"; echo -e "${RED}[ERROR]${NC} ${s}${*:+ - $*}" | tee -a "$LOG_FILE"; }
 
 step() {
@@ -74,13 +77,12 @@ parse_args() {
 }
 
 require_root() { [[ "${EUID}" -eq 0 ]] || err "Run as root: sudo bash install.sh --mode=full"; }
-
 ram_gb() { awk '/MemTotal/{printf "%d", ($2/1024/1024)+0.5}' /proc/meminfo; }
 
 print_status_summary() {
   echo -e "\n${BOLD}Installation status summary${NC}" | tee -a "$LOG_FILE"
   for s in "${SECTIONS[@]}"; do
-    printf '  - %-24s : %s\n' "$s" "${STATUS[$s]}" | tee -a "$LOG_FILE"
+    printf '  - %-26s : %s\n' "$s" "${STATUS[$s]}" | tee -a "$LOG_FILE"
   done
 }
 
@@ -106,11 +108,11 @@ show_es_diagnostics() {
     echo "cat /etc/elasticsearch/jvm.options.d/siemba.options"
     sed -n '1,80p' /etc/elasticsearch/jvm.options.d/siemba.options || true
     echo
+    echo "keystore list"
+    su -s /bin/bash -c 'ES_PATH_CONF=/etc/elasticsearch /usr/share/elasticsearch/bin/elasticsearch-keystore list' elasticsearch || true
+    echo
     echo "sysctl vm.max_map_count"
     sysctl vm.max_map_count || true
-    echo
-    echo "ulimit -n"
-    su -s /bin/bash -c 'ulimit -n' elasticsearch || true
   } | tee -a "$LOG_FILE"
 }
 
@@ -137,13 +139,11 @@ ensure_swap() {
   local swap_mb desired_gb
   swap_mb="$(awk '/SwapTotal/{print int($2/1024)}' /proc/meminfo)"
   [[ "$MODE" == "full" ]] && desired_gb=8 || desired_gb=4
-
   if (( swap_mb >= 2048 )); then
     log "Swap already present: ${swap_mb}MB"
     status_ok "Swap"
     return 0
   fi
-
   warn "Low/no swap detected. Creating ${desired_gb}GB /swapfile for install stability..."
   if [[ ! -f /swapfile ]]; then
     q fallocate -l "${desired_gb}G" /swapfile || q dd if=/dev/zero of=/swapfile bs=1M count=$((desired_gb*1024))
@@ -152,7 +152,6 @@ ensure_swap() {
   fi
   swapon /swapfile 2>/dev/null || true
   grep -qE '^/swapfile\s+' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
-  log "Swap enabled."
   status_ok "Swap"
 }
 
@@ -171,9 +170,7 @@ prereqs_linux() {
 setup_java() {
   register_section "Java"
   step "Java runtime"
-  # Elastic bundles a JDK, but OpenJDK is useful for other components/tools.
   if q apt-get install -y openjdk-17-jre-headless; then
-    java -version 2>&1 | tee -a "$LOG_FILE" >/dev/null || true
     status_ok "Java"
   else
     status_fail "Java" "openjdk-17-jre-headless install failed"
@@ -184,18 +181,17 @@ setup_java() {
 setup_system_tuning() {
   register_section "System tuning"
   step "System tuning for Elasticsearch"
-  mkdir -p /etc/sysctl.d /etc/systemd/system/elasticsearch.service.d
-
+  mkdir -p /etc/sysctl.d /etc/systemd/system/elasticsearch.service.d /etc/security/limits.d
   cat > /etc/sysctl.d/99-siemba-elasticsearch.conf <<'EOF'
 vm.max_map_count=1048576
 fs.file-max=65535
 EOF
-
+  sysctl -w vm.max_map_count=1048576 >> "$LOG_FILE" 2>&1 || true
+  sysctl -w fs.file-max=65535 >> "$LOG_FILE" 2>&1 || true
   if ! sysctl --system >> "$LOG_FILE" 2>&1; then
     status_fail "System tuning" "sysctl apply failed"
     err "System tuning failed"
   fi
-
   cat > /etc/systemd/system/elasticsearch.service.d/override.conf <<'EOF'
 [Service]
 Environment=ES_PATH_CONF=/etc/elasticsearch
@@ -205,7 +201,12 @@ LimitNPROC=4096
 LimitMEMLOCK=infinity
 TimeoutStartSec=300
 EOF
-
+  cat > /etc/security/limits.d/99-elasticsearch.conf <<'EOF'
+elasticsearch soft nofile 65535
+elasticsearch hard nofile 65535
+elasticsearch soft nproc 4096
+elasticsearch hard nproc 4096
+EOF
   status_ok "System tuning"
 }
 
@@ -234,10 +235,44 @@ repair_elasticsearch_dirs() {
   chmod 750 /var/lib/elasticsearch /var/lib/elasticsearch/tmp /var/log/elasticsearch /etc/elasticsearch
 }
 
+cleanup_es_security_autoconfig() {
+  register_section "ES security cleanup"
+  step "Elasticsearch security cleanup"
+  local ks="/usr/share/elasticsearch/bin/elasticsearch-keystore"
+
+  if [[ ! -x "$ks" ]]; then
+    status_fail "ES security cleanup" "keystore tool missing"
+    return 1
+  fi
+
+  # Stop service before touching keystore/config.
+  systemctl stop elasticsearch >/dev/null 2>&1 || true
+
+  # Ensure a keystore exists in the config dir.
+  if [[ ! -f /etc/elasticsearch/elasticsearch.keystore ]]; then
+    su -s /bin/bash -c 'ES_PATH_CONF=/etc/elasticsearch /usr/share/elasticsearch/bin/elasticsearch-keystore create -f' elasticsearch >> "$LOG_FILE" 2>&1 || true
+  fi
+
+  # Remove any auto-configured SSL secure settings that conflict with disabled security.
+  mapfile -t keys < <(su -s /bin/bash -c 'ES_PATH_CONF=/etc/elasticsearch /usr/share/elasticsearch/bin/elasticsearch-keystore list 2>/dev/null' elasticsearch | grep '^xpack\.security\..*ssl\..*secure_')
+  if (( ${#keys[@]} > 0 )); then
+    for k in "${keys[@]}"; do
+      log "Removing stale keystore setting: ${k}"
+      su -s /bin/bash -c "ES_PATH_CONF=/etc/elasticsearch /usr/share/elasticsearch/bin/elasticsearch-keystore remove '${k}'" elasticsearch >> "$LOG_FILE" 2>&1 || true
+    done
+  fi
+
+  # Remove auto-generated cert references directory if present; we are running insecure local mode.
+  rm -rf /etc/elasticsearch/certs >/dev/null 2>&1 || true
+
+  chown elasticsearch:elasticsearch /etc/elasticsearch/elasticsearch.keystore >/dev/null 2>&1 || true
+  chmod 660 /etc/elasticsearch/elasticsearch.keystore >/dev/null 2>&1 || true
+  status_ok "ES security cleanup"
+}
+
 install_elasticsearch() {
   register_section "Elasticsearch"
   step "Elasticsearch ${ES_VERSION_SERIES}"
-
   add_elastic_repo || { status_fail "Elasticsearch" "repo setup failed"; err "Elastic repo setup failed"; }
   q apt-get install -y elasticsearch || { status_fail "Elasticsearch" "package install failed"; err "Elasticsearch package install failed"; }
 
@@ -254,8 +289,6 @@ EOF
   chown elasticsearch:elasticsearch /etc/elasticsearch/jvm.options.d/siemba.options
   chmod 640 /etc/elasticsearch/jvm.options.d/siemba.options
 
-  # Some package revisions leave /etc/default/elasticsearch influencing startup;
-  # keep it aligned with our explicit paths.
   cat > /etc/default/elasticsearch <<'EOF'
 ES_HOME=/usr/share/elasticsearch
 ES_PATH_CONF=/etc/elasticsearch
@@ -263,6 +296,8 @@ ES_JAVA_HOME=
 ES_JAVA_OPTS=
 RESTART_ON_UPGRADE=false
 EOF
+
+  cleanup_es_security_autoconfig || true
 
   cp -a /etc/elasticsearch/elasticsearch.yml "/etc/elasticsearch/elasticsearch.yml.bak.$(date +%F-%H%M%S)" 2>/dev/null || true
   cat > /etc/elasticsearch/elasticsearch.yml <<'EOF'
@@ -274,13 +309,15 @@ network.host: 127.0.0.1
 http.port: 9200
 discovery.type: single-node
 xpack.security.enabled: false
+xpack.security.autoconfiguration.enabled: false
+xpack.security.transport.ssl.enabled: false
+xpack.security.http.ssl.enabled: false
 bootstrap.memory_lock: false
 EOF
   chown elasticsearch:elasticsearch /etc/elasticsearch/elasticsearch.yml
   chmod 660 /etc/elasticsearch/elasticsearch.yml
 
-  # Clean stale dirs inside ES_HOME that sometimes break startup diagnostics.
-  rm -rf /usr/share/elasticsearch/logs 2>/dev/null || true
+  rm -rf /usr/share/elasticsearch/logs >/dev/null 2>&1 || true
   install -d -o elasticsearch -g elasticsearch -m 0750 /usr/share/elasticsearch/logs || true
 
   systemctl daemon-reload
