@@ -1,30 +1,30 @@
 #!/usr/bin/env bash
 # =============================================================================
-# SIEMBA Installer v2.0.1-production
-# Secure single-host production-oriented installer for Ubuntu/Debian
+# SIEMBA Installer v2.2.0-production
+# Clean production-oriented single-host installer for Ubuntu/Debian
 # Components: Elasticsearch, Kibana, Logstash, Grafana, Nginx
-# Notes:
+# Key design choices:
 #   - Elasticsearch security enabled
-#   - HTTPS between local Elastic components via local CA/certs
-#   - Public access via Nginx; Let's Encrypt if domain+email supplied, otherwise self-signed
-#   - Conservative heap sizing for 12GB hosts (3g)
+#   - Manual TLS using PKCS#12 certs (avoids PEM empty-password certutil bug)
+#   - Public URLs based on --domain or detected primary IP
+#   - Root URL redirects to /kibana/ (no dead :3000 upstream)
+#   - Browser TLS via Let's Encrypt when FQDN+email are provided, else self-signed
 # =============================================================================
 
 set -Eeuo pipefail
 shopt -s lastpipe
 
-VERSION="2.0.1-production"
+VERSION="2.2.0-production"
 LOG_FILE="/tmp/siemba-install.log"
 BACKUP_DIR="/root/siemba-backups/$(date +%F-%H%M%S)"
 INSTALL_DIR="/opt/siemba"
 MODE="full"
 ELASTIC_SERIES="8.x"
-DOMAIN="localhost"
+DOMAIN=""
 EMAIL=""
 ENABLE_UFW="false"
-FORCE_RECONFIGURE="false"
-PLATFORM=""
 PRIMARY_IP=""
+PUBLIC_HOST=""
 ES_HEAP_GB=""
 TLS_MODE="self-signed"
 ELASTIC_PASS=""
@@ -60,21 +60,21 @@ banner() {
 BANNER
   echo -e "   Security Intelligence & Event Management Battle Armor"
   echo -e "   Production installer"
+  echo -e "   By Roy Coren-cisoeynu.com & Claude code"
   echo -e "   v${VERSION}  |  log: ${LOG_FILE}\n"
 }
 
 usage() {
   cat <<EOF
-Usage: sudo bash install-v2.0.1-production.sh [options]
+Usage: sudo bash install.sh [options]
 
 Options:
-  --mode=full|elastic-only       Install full stack or only Elasticsearch
-  --domain=FQDN_OR_IP            Public domain/IP for URLs and Nginx (default: localhost)
-  --email=EMAIL                  Email for Let's Encrypt (optional)
-  --elastic-series=8.x           Elastic series (default: 8.x)
-  --enable-ufw=true|false        Apply basic UFW rules (default: false)
-  --force-reconfigure=true|false Continue even if existing ES data exists (default: false)
-  -h, --help                     Show help
+  --mode=full|elastic-only    Install full stack or only Elasticsearch
+  --domain=FQDN_OR_IP         Public domain or IP for Nginx/public URLs (optional)
+  --email=EMAIL               Email for Let's Encrypt (optional)
+  --elastic-series=8.x        Elastic series (default: 8.x)
+  --enable-ufw=true|false     Apply basic UFW rules (default: false)
+  -h, --help                  Show help
 EOF
 }
 
@@ -86,7 +86,6 @@ parse_args() {
       --email=*) EMAIL="${arg#--email=}" ;;
       --elastic-series=*) ELASTIC_SERIES="${arg#--elastic-series=}" ;;
       --enable-ufw=*) ENABLE_UFW="${arg#--enable-ufw=}" ;;
-      --force-reconfigure=*) FORCE_RECONFIGURE="${arg#--force-reconfigure=}" ;;
       -h|--help) usage; exit 0 ;;
       *) warn "Ignoring unknown argument: $arg" ;;
     esac
@@ -99,36 +98,42 @@ step() {
   echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n" | tee -a "$LOG_FILE"
 }
 
-require_root() { [[ "${EUID}" -eq 0 ]] || err "Run as root: sudo bash install-v2.0.1-production.sh"; }
+require_root() { [[ "${EUID}" -eq 0 ]] || err "Run as root: sudo bash install.sh"; }
+primary_ip() { ip route get 1.1.1.1 2>/dev/null | awk '/src/ {for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}'; }
 ram_gb() { awk '/MemTotal/{printf "%d", ($2/1024/1024)+0.5}' /proc/meminfo; }
 randpass() { openssl rand -base64 36 | tr -dc 'A-Za-z0-9' | head -c 24; }
 is_ip() { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
-primary_ip() { ip route get 1.1.1.1 2>/dev/null | awk '/src/ {for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}'; }
 backup_file() { local f="$1"; [[ -e "$f" ]] || return 0; mkdir -p "$BACKUP_DIR"; cp -a "$f" "$BACKUP_DIR/" 2>/dev/null || true; }
 
-public_host() {
-  if [[ "$DOMAIN" == "localhost" || -z "$DOMAIN" ]]; then
-    echo "${PRIMARY_IP:-127.0.0.1}"
-  else
-    echo "$DOMAIN"
+calc_heap() {
+  local ram="$1"
+  if (( ram < 8 )); then echo 2
+  elif (( ram < 16 )); then echo 3
+  else echo 4
   fi
 }
 
-wait_for_https() {
-  local url="$1" ca="$2" retries="${3:-90}" code i
+wait_http_code() {
+  local url="$1" expect1="$2" expect2="$3" retries="${4:-120}"
+  local i code
   for ((i=1;i<=retries;i++)); do
-    code=$(curl --cacert "$ca" -s -o /dev/null -w '%{http_code}' "$url" || true)
-    if [[ "$code" == "200" || "$code" == "401" ]]; then return 0; fi
+    code=$(curl -k -s -o /dev/null -w '%{http_code}' "$url" || true)
+    if [[ "$code" == "$expect1" || "$code" == "$expect2" ]]; then
+      return 0
+    fi
     sleep 2
   done
   return 1
 }
 
-wait_for_http() {
-  local url="$1" retries="${2:-90}" code i
+wait_https_with_ca() {
+  local url="$1" ca="$2" retries="${3:-120}"
+  local i code
   for ((i=1;i<=retries;i++)); do
-    code=$(curl -s -o /dev/null -w '%{http_code}' "$url" || true)
-    if [[ "$code" == "200" || "$code" == "302" || "$code" == "401" ]]; then return 0; fi
+    code=$(curl --cacert "$ca" -s -o /dev/null -w '%{http_code}' "$url" || true)
+    if [[ "$code" == "200" || "$code" == "401" ]]; then
+      return 0
+    fi
     sleep 2
   done
   return 1
@@ -149,11 +154,41 @@ show_es_diagnostics() {
     echo "----- journalctl -u elasticsearch (last 200) -----"
     journalctl -u elasticsearch -n 200 --no-pager || true
     echo
-    echo "----- /var/log/elasticsearch/siemba-cluster.log (last 200) -----"
-    tail -n 200 /var/log/elasticsearch/siemba-cluster.log || true
+    echo "----- /var/log/elasticsearch/* -----"
+    ls -lah /var/log/elasticsearch || true
     echo
     echo "----- /etc/elasticsearch/elasticsearch.yml -----"
     sed -n '1,240p' /etc/elasticsearch/elasticsearch.yml || true
+  } | tee -a "$LOG_FILE"
+}
+
+show_kibana_diagnostics() {
+  {
+    echo "----- systemctl status kibana -----"
+    systemctl status kibana --no-pager || true
+    echo
+    echo "----- journalctl -u kibana (last 200) -----"
+    journalctl -u kibana -n 200 --no-pager || true
+  } | tee -a "$LOG_FILE"
+}
+
+show_logstash_diagnostics() {
+  {
+    echo "----- systemctl status logstash -----"
+    systemctl status logstash --no-pager || true
+    echo
+    echo "----- journalctl -u logstash (last 200) -----"
+    journalctl -u logstash -n 200 --no-pager || true
+  } | tee -a "$LOG_FILE"
+}
+
+show_grafana_diagnostics() {
+  {
+    echo "----- systemctl status grafana-server -----"
+    systemctl status grafana-server --no-pager || true
+    echo
+    echo "----- journalctl -u grafana-server (last 200) -----"
+    journalctl -u grafana-server -n 200 --no-pager || true
   } | tee -a "$LOG_FILE"
 }
 
@@ -162,8 +197,8 @@ detect_platform() {
   if [[ -f /etc/os-release ]]; then
     # shellcheck disable=SC1091
     . /etc/os-release
-    PLATFORM="linux"
     PRIMARY_IP="$(primary_ip || true)"
+    PUBLIC_HOST="${DOMAIN:-${PRIMARY_IP:-127.0.0.1}}"
     log "Platform: Linux (${ID:-unknown} ${VERSION_ID:-})"
     case "${ID:-}" in
       ubuntu|debian) status_ok "Platform" ;;
@@ -176,25 +211,47 @@ detect_platform() {
   command -v systemctl >/dev/null 2>&1 || err "systemd/systemctl is required."
 }
 
-check_existing_state() {
-  register_section "Existing state"
-  step "Checking existing state"
-  mkdir -p "$BACKUP_DIR"
-  if [[ -d /var/lib/elasticsearch ]] && find /var/lib/elasticsearch -mindepth 1 -print -quit | grep -q .; then
-    warn "Existing Elasticsearch data detected"
-    if [[ "$FORCE_RECONFIGURE" != "true" ]]; then
-      status_fail "Existing state" "existing ES data; rerun with --force-reconfigure=true if intentional"
-      err "Refusing to modify existing Elasticsearch state without --force-reconfigure=true"
-    fi
-  fi
-  status_ok "Existing state"
+prepare_clean_state() {
+  register_section "Prepare state"
+  step "Preparing a clean SIEMBA state"
+
+  # Stop services if present
+  for s in grafana-server logstash kibana elasticsearch nginx thehive cassandra; do
+    systemctl stop "$s" >> "$LOG_FILE" 2>&1 || true
+  done
+
+  # Remove old packages if partially installed; ignore failures
+  export DEBIAN_FRONTEND=noninteractive
+  q apt-get remove -y elasticsearch kibana logstash grafana grafana-enterprise thehive cassandra || true
+  q apt-get autoremove -y || true
+
+  # Remove repos created by older runs
+  rm -f /etc/apt/sources.list.d/elastic-*.list /etc/apt/sources.list.d/grafana.list /etc/apt/sources.list.d/strangebee.list || true
+  rm -f /usr/share/keyrings/elasticsearch-keyring.gpg /etc/apt/keyrings/grafana.asc /etc/apt/keyrings/strangebee.asc || true
+  q apt-get update || true
+
+  # Remove stale runtime/config/data/certs from previous failed runs
+  rm -rf \
+    /var/lib/elasticsearch /var/log/elasticsearch /etc/elasticsearch \
+    /etc/kibana /var/lib/kibana \
+    /etc/logstash /var/lib/logstash /var/log/logstash \
+    /etc/grafana /var/lib/grafana \
+    /etc/ssl/siemba /var/www/siemba /opt/siemba \
+    /etc/nginx/sites-available/siemba /etc/nginx/sites-enabled/siemba || true
+
+  # Remove old SIEMBA runtime files
+  rm -f /etc/systemd/system/elasticsearch.service.d/override.conf /etc/security/limits.d/99-elasticsearch.conf /etc/sysctl.d/99-siemba-elasticsearch.conf || true
+  systemctl daemon-reload >> "$LOG_FILE" 2>&1 || true
+  systemctl reset-failed >> "$LOG_FILE" 2>&1 || true
+
+  status_ok "Prepare state"
 }
 
 ensure_swap() {
   register_section "Swap"
   local swap_mb desired_gb
   swap_mb="$(awk '/SwapTotal/{print int($2/1024)}' /proc/meminfo)"
-  [[ "$MODE" == "full" ]] && desired_gb=8 || desired_gb=4
+  desired_gb=4
   if (( swap_mb >= 2048 )); then
     log "Swap already present: ${swap_mb}MB"
     status_ok "Swap"
@@ -277,6 +334,22 @@ install_elastic_packages() {
   fi
 }
 
+install_grafana_package() {
+  register_section "Grafana package"
+  step "Installing Grafana"
+  mkdir -p /etc/apt/keyrings
+  wget -O /etc/apt/keyrings/grafana.asc https://apt.grafana.com/gpg-full.key >> "$LOG_FILE" 2>&1
+  chmod 644 /etc/apt/keyrings/grafana.asc
+  echo "deb [signed-by=/etc/apt/keyrings/grafana.asc] https://apt.grafana.com stable main" > /etc/apt/sources.list.d/grafana.list
+  q apt-get update
+  if q apt-get install -y grafana; then
+    status_ok "Grafana package"
+  else
+    status_fail "Grafana package" "package install failed"
+    err "Grafana package installation failed"
+  fi
+}
+
 cleanup_stale_es_keystore() {
   register_section "ES keystore cleanup"
   step "Cleaning stale Elasticsearch secure settings"
@@ -295,28 +368,12 @@ cleanup_stale_es_keystore() {
   status_ok "ES keystore cleanup"
 }
 
-calc_es_heap_gb() {
-  local ram heap
-  ram="$(ram_gb)"
-  if (( ram < 8 )); then heap=2; elif (( ram < 16 )); then heap=3; else heap=4; fi
-  echo "$heap"
-}
-
 generate_es_certs() {
   register_section "ES certificates"
   step "Generating Elasticsearch CA and node certificates"
   mkdir -p "$ES_CERT_DIR" /var/lib/elasticsearch/tmp /var/log/elasticsearch /var/lib/elasticsearch
   chown -R elasticsearch:elasticsearch /etc/elasticsearch /var/lib/elasticsearch /var/log/elasticsearch
   chmod 750 /etc/elasticsearch /var/lib/elasticsearch /var/log/elasticsearch /var/lib/elasticsearch/tmp
-
-  rm -rf "$ES_CERT_DIR/ca" "$ES_CERT_DIR/generated" "$ES_CERT_DIR/ca.zip" "$ES_CERT_DIR/certs.zip"
-  q /usr/share/elasticsearch/bin/elasticsearch-certutil ca --silent --pem --out "$ES_CERT_DIR/ca.zip" --pass ''
-  unzip -o "$ES_CERT_DIR/ca.zip" -d "$ES_CERT_DIR/ca" >> "$LOG_FILE" 2>&1
-
-  local ca_crt ca_key
-  ca_crt="$(find "$ES_CERT_DIR/ca" -type f -name '*.crt' | head -n1)"
-  ca_key="$(find "$ES_CERT_DIR/ca" -type f -name '*.key' | head -n1)"
-  [[ -n "$ca_crt" && -n "$ca_key" ]] || { status_fail "ES certificates" "failed to generate CA"; err "Certificate authority generation failed"; }
 
   cat > "$ES_CERT_DIR/instances.yml" <<EOF
 instances:
@@ -326,29 +383,30 @@ instances:
       - "$(hostname -s)"
       - "$(hostname -f 2>/dev/null || hostname -s)"
 EOF
-  if [[ -n "$DOMAIN" && "$DOMAIN" != "localhost" ]] && ! is_ip "$DOMAIN"; then
+  if [[ -n "$DOMAIN" ]] && ! is_ip "$DOMAIN"; then
     echo "      - \"$DOMAIN\"" >> "$ES_CERT_DIR/instances.yml"
   fi
   cat >> "$ES_CERT_DIR/instances.yml" <<EOF
     ip:
       - "127.0.0.1"
+      - "${PRIMARY_IP:-127.0.0.1}"
 EOF
-  [[ -n "$PRIMARY_IP" ]] && echo "      - \"$PRIMARY_IP\"" >> "$ES_CERT_DIR/instances.yml"
-  is_ip "$(public_host)" && echo "      - \"$(public_host)\"" >> "$ES_CERT_DIR/instances.yml"
+  if is_ip "$PUBLIC_HOST"; then
+    echo "      - \"$PUBLIC_HOST\"" >> "$ES_CERT_DIR/instances.yml"
+  fi
 
-  q /usr/share/elasticsearch/bin/elasticsearch-certutil cert --silent --pem --ca-cert "$ca_crt" --ca-key "$ca_key" --in "$ES_CERT_DIR/instances.yml" --out "$ES_CERT_DIR/certs.zip" --pass ''
-  unzip -o "$ES_CERT_DIR/certs.zip" -d "$ES_CERT_DIR/generated" >> "$LOG_FILE" 2>&1
-  local node_crt node_key
-  node_crt="$(find "$ES_CERT_DIR/generated" -type f -name '*.crt' ! -name 'ca.crt' | head -n1)"
-  node_key="$(find "$ES_CERT_DIR/generated" -type f -name '*.key' ! -name 'ca.key' | head -n1)"
-  [[ -n "$node_crt" && -n "$node_key" ]] || { status_fail "ES certificates" "failed to generate node cert/key"; err "Node certificate generation failed"; }
-  cp -f "$node_crt" "$ES_CERT_DIR/node.crt"
-  cp -f "$node_key" "$ES_CERT_DIR/node.key"
-  cp -f "$ca_crt" "$ES_CERT_DIR/http_ca.crt"
+  # PKCS#12 mode works with blank passwords; PEM+blank passwords is a known certutil failure.
+  q /usr/share/elasticsearch/bin/elasticsearch-certutil ca --silent --out "$ES_CERT_DIR/ca.p12" --pass ""
+  q /usr/share/elasticsearch/bin/elasticsearch-certutil cert --silent --ca "$ES_CERT_DIR/ca.p12" --ca-pass "" --in "$ES_CERT_DIR/instances.yml" --out "$ES_CERT_DIR/elastic-certificates.p12" --pass ""
+
+  # Extract CA cert PEM for Kibana/Logstash trust
+  openssl pkcs12 -in "$ES_CERT_DIR/ca.p12" -clcerts -nokeys -out "$ES_CERT_DIR/http_ca.crt" -passin pass: >> "$LOG_FILE" 2>&1 || \
+  openssl pkcs12 -in "$ES_CERT_DIR/ca.p12" -nokeys -out "$ES_CERT_DIR/http_ca.crt" -passin pass: >> "$LOG_FILE" 2>&1
+
   chown -R elasticsearch:elasticsearch "$ES_CERT_DIR"
   chmod 750 "$ES_CERT_DIR"
-  find "$ES_CERT_DIR" -type f -name '*.key' -exec chmod 640 {} \;
-  find "$ES_CERT_DIR" -type f ! -name '*.key' -exec chmod 644 {} \;
+  chmod 640 "$ES_CERT_DIR/ca.p12" "$ES_CERT_DIR/elastic-certificates.p12"
+  chmod 644 "$ES_CERT_DIR/http_ca.crt" "$ES_CERT_DIR/instances.yml"
   status_ok "ES certificates"
 }
 
@@ -360,7 +418,7 @@ configure_elasticsearch() {
   chown -R elasticsearch:elasticsearch /etc/elasticsearch /var/lib/elasticsearch /var/log/elasticsearch
   chmod 750 /var/lib/elasticsearch /var/log/elasticsearch /var/lib/elasticsearch/tmp /etc/elasticsearch
 
-  ES_HEAP_GB="$(calc_es_heap_gb)"
+  ES_HEAP_GB="$(calc_heap "$(ram_gb)")"
   cat > /etc/elasticsearch/jvm.options.d/siemba.options <<EOF
 -Xms${ES_HEAP_GB}g
 -Xmx${ES_HEAP_GB}g
@@ -378,16 +436,15 @@ network.host: 127.0.0.1
 http.port: 9200
 discovery.type: single-node
 xpack.security.enabled: true
+xpack.security.autoconfiguration.enabled: false
 xpack.security.enrollment.enabled: false
 xpack.security.http.ssl.enabled: true
-xpack.security.http.ssl.key: ${ES_CERT_DIR}/node.key
-xpack.security.http.ssl.certificate: ${ES_CERT_DIR}/node.crt
-xpack.security.http.ssl.certificate_authorities: ["${ES_CERT_DIR}/http_ca.crt"]
+xpack.security.http.ssl.keystore.path: ${ES_CERT_DIR}/elastic-certificates.p12
+xpack.security.http.ssl.truststore.path: ${ES_CERT_DIR}/elastic-certificates.p12
 xpack.security.transport.ssl.enabled: true
 xpack.security.transport.ssl.verification_mode: certificate
-xpack.security.transport.ssl.key: ${ES_CERT_DIR}/node.key
-xpack.security.transport.ssl.certificate: ${ES_CERT_DIR}/node.crt
-xpack.security.transport.ssl.certificate_authorities: ["${ES_CERT_DIR}/http_ca.crt"]
+xpack.security.transport.ssl.keystore.path: ${ES_CERT_DIR}/elastic-certificates.p12
+xpack.security.transport.ssl.truststore.path: ${ES_CERT_DIR}/elastic-certificates.p12
 bootstrap.memory_lock: false
 EOF
   chown elasticsearch:elasticsearch /etc/elasticsearch/elasticsearch.yml
@@ -400,7 +457,7 @@ EOF
     show_es_diagnostics
     err "Elasticsearch failed to start"
   fi
-  if ! wait_for_https "https://127.0.0.1:9200" "$ES_CERT_DIR/http_ca.crt" 120; then
+  if ! wait_https_with_ca "https://127.0.0.1:9200" "$ES_CERT_DIR/http_ca.crt" 120; then
     status_fail "Elasticsearch" "HTTPS endpoint not ready"
     show_es_diagnostics
     err "Elasticsearch HTTPS endpoint did not become ready"
@@ -431,15 +488,15 @@ configure_kibana() {
   chown -R kibana:kibana /etc/kibana "$KIBANA_CERT_DIR"
   chmod 750 /etc/kibana "$KIBANA_CERT_DIR"
   chmod 640 "$KIBANA_CERT_DIR/http_ca.crt"
-  local enc1 enc2 enc3 pub
+  local enc1 enc2 enc3 public_url
   enc1="$(openssl rand -hex 32)"; enc2="$(openssl rand -hex 32)"; enc3="$(openssl rand -hex 32)"
-  pub="https://$(public_host)/kibana"
+  public_url="https://${PUBLIC_HOST}/kibana"
   cat > /etc/kibana/kibana.yml <<EOF
 server.host: "127.0.0.1"
 server.port: 5601
 server.basePath: "/kibana"
 server.rewriteBasePath: true
-server.publicBaseUrl: "${pub}"
+server.publicBaseUrl: "${public_url}"
 elasticsearch.hosts: ["https://127.0.0.1:9200"]
 elasticsearch.username: "kibana_system"
 elasticsearch.ssl.certificateAuthorities: ["${KIBANA_CERT_DIR}/http_ca.crt"]
@@ -455,12 +512,12 @@ EOF
   systemctl enable kibana >> "$LOG_FILE" 2>&1 || true
   if ! systemctl restart kibana >> "$LOG_FILE" 2>&1; then
     status_fail "Kibana" "service failed to start"
-    journalctl -u kibana -n 200 --no-pager | tee -a "$LOG_FILE" || true
+    show_kibana_diagnostics
     err "Kibana failed to start"
   fi
-  if ! wait_for_http "http://127.0.0.1:5601/kibana/login" 180; then
+  if ! wait_http_code "http://127.0.0.1:5601/kibana/login" 200 302 180; then
     status_fail "Kibana" "endpoint not ready"
-    journalctl -u kibana -n 200 --no-pager | tee -a "$LOG_FILE" || true
+    show_kibana_diagnostics
     err "Kibana did not become ready"
   fi
   status_ok "Kibana"
@@ -511,37 +568,31 @@ EOF
   systemctl enable logstash >> "$LOG_FILE" 2>&1 || true
   if ! systemctl restart logstash >> "$LOG_FILE" 2>&1; then
     status_fail "Logstash" "service failed to start"
-    journalctl -u logstash -n 200 --no-pager | tee -a "$LOG_FILE" || true
+    show_logstash_diagnostics
     err "Logstash failed to start"
   fi
   status_ok "Logstash"
 }
 
-install_grafana() {
+configure_grafana() {
   register_section "Grafana"
-  step "Installing and configuring Grafana"
-  mkdir -p /etc/apt/keyrings
-  wget -O /etc/apt/keyrings/grafana.asc https://apt.grafana.com/gpg-full.key >> "$LOG_FILE" 2>&1
-  chmod 644 /etc/apt/keyrings/grafana.asc
-  echo "deb [signed-by=/etc/apt/keyrings/grafana.asc] https://apt.grafana.com stable main" > /etc/apt/sources.list.d/grafana.list
-  q apt-get update
-  q apt-get install -y grafana
+  step "Configuring Grafana"
   GRAFANA_PASS="$(randpass)"
   backup_file /etc/grafana/grafana.ini
   sed -i 's/^;*http_addr = .*/http_addr = 127.0.0.1/' /etc/grafana/grafana.ini
   sed -i 's/^;*http_port = .*/http_port = 3000/' /etc/grafana/grafana.ini
   sed -i 's/^;*serve_from_sub_path = .*/serve_from_sub_path = true/' /etc/grafana/grafana.ini
-  sed -i 's#^;*root_url = .*#root_url = https://'"$(public_host)"'/grafana/#' /etc/grafana/grafana.ini
+  sed -i 's#^;*root_url = .*#root_url = https://'"${PUBLIC_HOST}"'/grafana/#' /etc/grafana/grafana.ini
   systemctl enable grafana-server >> "$LOG_FILE" 2>&1 || true
   if ! systemctl restart grafana-server >> "$LOG_FILE" 2>&1; then
     status_fail "Grafana" "service failed to start"
-    journalctl -u grafana-server -n 200 --no-pager | tee -a "$LOG_FILE" || true
+    show_grafana_diagnostics
     err "Grafana failed to start"
   fi
   /usr/sbin/grafana-cli --homepath /usr/share/grafana --config /etc/grafana/grafana.ini admin reset-admin-password "$GRAFANA_PASS" >> "$LOG_FILE" 2>&1 || true
-  if ! wait_for_http "http://127.0.0.1:3000/login" 90; then
+  if ! wait_http_code "http://127.0.0.1:3000/login" 200 302 120; then
     status_fail "Grafana" "endpoint not ready"
-    journalctl -u grafana-server -n 200 --no-pager | tee -a "$LOG_FILE" || true
+    show_grafana_diagnostics
     err "Grafana did not become ready"
   fi
   status_ok "Grafana"
@@ -562,24 +613,23 @@ setup_nginx() {
   step "Configuring Nginx and browser TLS"
   write_landing_page
   backup_file /etc/nginx/sites-available/siemba
-  local host cert_path key_path
-  host="$(public_host)"
-  if [[ "$host" == "127.0.0.1" || "$host" == "localhost" ]] || is_ip "$host" || [[ -z "$EMAIL" ]]; then
+  local cert_path key_path host
+  host="$PUBLIC_HOST"
+  if is_ip "$host" || [[ -z "$EMAIL" ]]; then
     TLS_MODE="self-signed"
     mkdir -p /etc/ssl/siemba
     cert_path="/etc/ssl/siemba/siemba.crt"; key_path="/etc/ssl/siemba/siemba.key"
-    if [[ ! -f "$cert_path" || ! -f "$key_path" ]]; then
-      openssl req -x509 -nodes -newkey rsa:4096 -days 825 -keyout "$key_path" -out "$cert_path" -subj "/CN=${host}" >> "$LOG_FILE" 2>&1
-    fi
+    openssl req -x509 -nodes -newkey rsa:4096 -days 825 -keyout "$key_path" -out "$cert_path" -subj "/CN=${host}" >> "$LOG_FILE" 2>&1
     cat > /etc/nginx/sites-available/siemba <<EOF
 server { listen 80; server_name ${host}; return 301 https://\$host\$request_uri; }
 server {
   listen 443 ssl http2; server_name ${host};
   ssl_certificate ${cert_path}; ssl_certificate_key ${key_path};
   root /var/www/siemba; index index.html;
+  location = / { return 302 /kibana/; }
   location / { try_files \$uri \$uri/ =404; }
   location /kibana/ {
-    proxy_pass http://127.0.0.1:5601/kibana/;
+    proxy_pass http://127.0.0.1:5601;
     proxy_http_version 1.1;
     proxy_set_header Host \$host;
     proxy_set_header X-Real-IP \$remote_addr;
@@ -587,7 +637,7 @@ server {
     proxy_set_header X-Forwarded-Proto \$scheme;
   }
   location /grafana/ {
-    proxy_pass http://127.0.0.1:3000/grafana/;
+    proxy_pass http://127.0.0.1:3000;
     proxy_http_version 1.1;
     proxy_set_header Host \$host;
     proxy_set_header X-Real-IP \$remote_addr;
@@ -601,9 +651,10 @@ EOF
     cat > /etc/nginx/sites-available/siemba <<EOF
 server {
   listen 80; server_name ${host}; root /var/www/siemba; index index.html;
+  location = / { return 302 /kibana/; }
   location / { try_files \$uri \$uri/ =404; }
   location /kibana/ {
-    proxy_pass http://127.0.0.1:5601/kibana/;
+    proxy_pass http://127.0.0.1:5601;
     proxy_http_version 1.1;
     proxy_set_header Host \$host;
     proxy_set_header X-Real-IP \$remote_addr;
@@ -611,7 +662,7 @@ server {
     proxy_set_header X-Forwarded-Proto \$scheme;
   }
   location /grafana/ {
-    proxy_pass http://127.0.0.1:3000/grafana/;
+    proxy_pass http://127.0.0.1:3000;
     proxy_http_version 1.1;
     proxy_set_header Host \$host;
     proxy_set_header X-Real-IP \$remote_addr;
@@ -655,9 +706,9 @@ write_credentials() {
 SIEMBA ${VERSION}
 Generated: $(date -Is)
 
-Public URL: https://$(public_host)
-Kibana: https://$(public_host)/kibana/
-Grafana: https://$(public_host)/grafana/
+Public URL: https://${PUBLIC_HOST}
+Kibana: https://${PUBLIC_HOST}/kibana/
+Grafana: https://${PUBLIC_HOST}/grafana/
 
 Elasticsearch:
   URL: https://127.0.0.1:9200
@@ -670,7 +721,7 @@ Kibana service user:
   Password: ${KIBANA_SYSTEM_PASS}
 
 Grafana:
-  URL: https://$(public_host)/grafana/
+  URL: https://${PUBLIC_HOST}/grafana/
   User: admin
   Password: ${GRAFANA_PASS}
 
@@ -691,9 +742,9 @@ print_summary() {
   echo -e "\n${GREEN}✅ SIEMBA INSTALL COMPLETE / ATTEMPTED${NC}" | tee -a "$LOG_FILE"
   echo "Version: ${VERSION}" | tee -a "$LOG_FILE"
   echo "Mode: ${MODE}" | tee -a "$LOG_FILE"
-  echo "Public URL: https://$(public_host)" | tee -a "$LOG_FILE"
-  echo "Kibana: https://$(public_host)/kibana/" | tee -a "$LOG_FILE"
-  echo "Grafana: https://$(public_host)/grafana/" | tee -a "$LOG_FILE"
+  echo "Public URL: https://${PUBLIC_HOST}" | tee -a "$LOG_FILE"
+  echo "Kibana: https://${PUBLIC_HOST}/kibana/" | tee -a "$LOG_FILE"
+  echo "Grafana: https://${PUBLIC_HOST}/grafana/" | tee -a "$LOG_FILE"
   echo "Elasticsearch heap: ${ES_HEAP_GB:-n/a}g" | tee -a "$LOG_FILE"
   echo "Credentials: /root/siemba-credentials.txt" | tee -a "$LOG_FILE"
   echo "Log file: ${LOG_FILE}" | tee -a "$LOG_FILE"
@@ -705,11 +756,12 @@ main() {
   parse_args "$@"
   require_root
   detect_platform
-  check_existing_state
+  prepare_clean_state
   ensure_swap
   install_prereqs
   setup_system_tuning
   install_elastic_packages
+  install_grafana_package
   cleanup_stale_es_keystore
   generate_es_certs
   configure_elasticsearch
@@ -724,7 +776,7 @@ main() {
   configure_kibana
   create_logstash_api_key
   configure_logstash
-  install_grafana
+  configure_grafana
   setup_nginx
   setup_firewall || true
   write_credentials
