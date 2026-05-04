@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 # =============================================================================
-# SIEMBA Installer v1.0.4-hotfix
+# SIEMBA Installer v1.0.5-hotfix
 # Supported: Ubuntu/Debian systemd hosts
-# Purpose: Safer full install for 12GB RAM systems; avoids ES memory-lock failure
+# Fixes:
+#   - Elasticsearch log dir failure by explicitly setting path.logs/path.data
+#   - Conservative ES heap for 12GB RAM
+#   - Disables ES memory_lock for small/full-stack installs
+#   - Adds swap for install stability
+#   - Makes heavy optional components non-fatal
 # =============================================================================
 
 set -Eeuo pipefail
 
-SIEMBA_VERSION="1.0.4-hotfix"
+SIEMBA_VERSION="1.0.5-hotfix"
 INSTALL_DIR="/opt/siemba"
 LOG_FILE="/tmp/siemba-install.log"
 
@@ -40,7 +45,7 @@ banner() {
    ╚══════╝╚═╝╚══════╝╚═╝     ╚═╝╚═════╝ ╚═╝  ╚═╝
 BANNER
   echo -e "   Security Intelligence & Event Management Battle Armor"
-  echo -e "   By Roy Coren (Cisoeynu.com) & Claude Code"
+  echo -e "   By Roy Coren (Cisoeynu.com)"
   echo -e "   v${SIEMBA_VERSION}  |  log: ${LOG_FILE}\n"
 }
 
@@ -87,16 +92,9 @@ ram_gb() {
 }
 
 ensure_swap() {
-  local ram swap_mb desired_gb
-  ram="$(ram_gb)"
+  local swap_mb desired_gb
   swap_mb="$(awk '/SwapTotal/{print int($2/1024)}' /proc/meminfo)"
-
-  # Full mode on 12GB benefits from swap because ES+Kibana+Logstash+Cassandra can spike.
-  if [[ "$MODE" == "full" ]]; then
-    desired_gb=8
-  else
-    desired_gb=4
-  fi
+  [[ "$MODE" == "full" ]] && desired_gb=8 || desired_gb=4
 
   if (( swap_mb >= 2048 )); then
     log "Swap already present: ${swap_mb}MB"
@@ -141,8 +139,6 @@ add_elastic_repo() {
 calc_es_heap_gb() {
   local ram heap
   ram="$(ram_gb)"
-
-  # Conservative full-stack sizing. On 12GB: 3g.
   if (( ram < 8 )); then
     heap=2
   elif (( ram < 16 )); then
@@ -156,19 +152,29 @@ calc_es_heap_gb() {
   echo "$heap"
 }
 
+repair_elasticsearch_dirs() {
+  log "Repairing Elasticsearch directories and ownership..."
+  mkdir -p /var/lib/elasticsearch /var/log/elasticsearch /etc/elasticsearch/jvm.options.d
+  chown -R elasticsearch:elasticsearch /var/lib/elasticsearch /var/log/elasticsearch /etc/elasticsearch
+  chmod 750 /var/lib/elasticsearch /var/log/elasticsearch /etc/elasticsearch
+}
+
 install_elasticsearch() {
   step "Elasticsearch 8.x"
   add_elastic_repo
   q apt-get install -y elasticsearch
 
+  repair_elasticsearch_dirs
+
   local heap
   heap="$(calc_es_heap_gb)"
   log "Setting Elasticsearch heap to ${heap}g"
-  mkdir -p /etc/elasticsearch/jvm.options.d
   cat > /etc/elasticsearch/jvm.options.d/siemba.options <<EOF
 -Xms${heap}g
 -Xmx${heap}g
 EOF
+  chown elasticsearch:elasticsearch /etc/elasticsearch/jvm.options.d/siemba.options
+  chmod 640 /etc/elasticsearch/jvm.options.d/siemba.options
 
   mkdir -p /etc/systemd/system/elasticsearch.service.d
   cat > /etc/systemd/system/elasticsearch.service.d/override.conf <<'EOF'
@@ -181,22 +187,27 @@ EOF
   cat > /etc/elasticsearch/elasticsearch.yml <<'EOF'
 cluster.name: siemba-cluster
 node.name: siemba-node-1
+path.data: /var/lib/elasticsearch
+path.logs: /var/log/elasticsearch
 network.host: 127.0.0.1
 http.port: 9200
 xpack.security.enabled: false
 bootstrap.memory_lock: false
 discovery.type: single-node
 EOF
+  chown elasticsearch:elasticsearch /etc/elasticsearch/elasticsearch.yml
+  chmod 660 /etc/elasticsearch/elasticsearch.yml
 
   systemctl daemon-reload
+  systemctl reset-failed elasticsearch >/dev/null 2>&1 || true
   systemctl enable elasticsearch >> "$LOG_FILE" 2>&1
   log "Starting Elasticsearch..."
   if ! systemctl restart elasticsearch >> "$LOG_FILE" 2>&1; then
-    journalctl -u elasticsearch -n 120 --no-pager | tee -a "$LOG_FILE" || true
+    journalctl -u elasticsearch -n 160 --no-pager | tee -a "$LOG_FILE" || true
     err "Elasticsearch failed to start. Full log: $LOG_FILE"
   fi
 
-  for i in {1..60}; do
+  for i in {1..90}; do
     if curl -fsS http://127.0.0.1:9200 >/dev/null 2>&1; then
       log "Elasticsearch: UP ✓"
       return 0
@@ -204,7 +215,7 @@ EOF
     sleep 2
   done
 
-  journalctl -u elasticsearch -n 120 --no-pager | tee -a "$LOG_FILE" || true
+  journalctl -u elasticsearch -n 160 --no-pager | tee -a "$LOG_FILE" || true
   err "Elasticsearch service started but HTTP API did not become ready."
 }
 
@@ -245,6 +256,7 @@ install_grafana() {
   echo "deb [signed-by=/usr/share/keyrings/grafana.key] https://packages.grafana.com/oss/deb stable main" > /etc/apt/sources.list.d/grafana.list
   q apt-get update
   q apt-get install -y grafana
+  sed -i 's/^;*http_port = .*/http_port = 3001/' /etc/grafana/grafana.ini
   sed -i 's/^;*serve_from_sub_path = .*/serve_from_sub_path = true/' /etc/grafana/grafana.ini
   sed -i 's#^;*root_url = .*#root_url = %(protocol)s://%(domain)s:%(http_port)s/grafana/#' /etc/grafana/grafana.ini
   systemctl enable grafana-server >> "$LOG_FILE" 2>&1
@@ -254,9 +266,8 @@ install_grafana() {
 
 install_thehive() {
   step "TheHive 5 optional install"
-  warn "TheHive/Cassandra is heavy for 12GB RAM. Installing packages, but failure will not stop SIEMBA."
+  warn "TheHive/Cassandra is heavy for 12GB RAM. Failure here will not stop SIEMBA."
   q apt-get install -y cassandra || { warn "Cassandra install failed/skipped"; return 0; }
-
   wget -qO /etc/apt/trusted.gpg.d/strangebee.gpg https://raw.githubusercontent.com/StrangeBee/packages/main/strangebee.gpg || true
   echo "deb https://deb.strangebee.com thehive-5.x main" > /etc/apt/sources.list.d/strangebee.list
   q apt-get update || true
@@ -308,7 +319,7 @@ server {
     }
 
     location /grafana/ {
-        proxy_pass http://127.0.0.1:3000/;
+        proxy_pass http://127.0.0.1:3001/;
         proxy_http_version 1.1;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
