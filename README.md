@@ -1,4 +1,4 @@
-# 🦁 SIEMBA — Security Intelligence & Event Management Battle Armor
+#  SIEMBA — Security Intelligence & Event Management Battle Armor
 
 > One-stop SIEM + SOC platform for CISOs and Security Engineers  
 > Elasticsearch · Kibana · Grafana · TheHive · Logstash · Open Source · Self-Hosted
