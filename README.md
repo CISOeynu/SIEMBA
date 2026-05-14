@@ -24,7 +24,7 @@ SIEMBA combines enterprise SIEM log collection with active SOC tooling in a sing
 
 ### Ubuntu 22.04 / 24.04 — Full Native
 ```bash
-curl -fsSL https://raw.githubusercontent.com/CISOeynu/siemba/main/scripts/install.sh | sudo bash -s -- --mode=full --domain=192.168.130.178 --email=admin@cisoeynu.com
+curl -fsSL https://raw.githubusercontent.com/CISOeynu/siemba/main/scripts/install.sh | sudo bash -s -- --mode=full --domain=IP ADDR --email=admin@cisoeynu.com
 
 ```
 
