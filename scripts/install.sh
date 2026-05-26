@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# SIEMBA Installer v1.0.5
+# SIEMBA Installer v1.0.6
 # Optimized for Ubuntu (x86/ARM), Debian, and Low-Resource POCs
 # =============================================================================
 
@@ -15,7 +15,6 @@ LOG_FILE="/tmp/siemba-install.log"
 MODE="full"
 DOMAIN="localhost"
 EMAIL="admin@example.com"
-PLATFORM=""
 
 # ── Colors ────────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -53,6 +52,12 @@ parse_args() {
       --email=*)  EMAIL="${arg#--email=}"  ;;
     esac
   done
+  
+  # Strip unneeded quotes or spaces if "IP ADDR" placeholder text is passed accidentally
+  if [[ "$DOMAIN" == "IP ADDR" || -z "$DOMAIN" ]]; then
+    warn "Domain/IP was not explicitly specified. Defaulting to system localhost."
+    DOMAIN="127.0.0.1"
+  fi
 }
 
 system_tuning() {
@@ -75,6 +80,7 @@ system_tuning() {
 
   # 3. APT Update
   export DEBIAN_FRONTEND=noninteractive
+  log "Updating package lists & dependencies..."
   q apt-get update && q apt-get install -y curl wget git jq unzip gnupg nginx openjdk-17-jdk
 }
 
@@ -92,17 +98,13 @@ install_elasticsearch() {
   log "Installing package (re-extracting configs)..."
   apt-get install -y -o Dpkg::Options::="--force-confmiss" elasticsearch >> "$LOG_FILE" 2>&1
 
-  # Permissions Fix
-  log "Applying permission fixes..."
-  chown -R elasticsearch:elasticsearch /etc/elasticsearch /var/lib/elasticsearch /var/log/elasticsearch
-
   # JVM Heap Tuning (Set to 2G for your 12GB system)
   cat > /etc/elasticsearch/jvm.options.d/siemba.options << EOF
 -Xms2g
 -Xmx2g
 EOF
 
-  # Minimal Working Config
+  # Minimal Working Config without contradictory TLS settings
   log "Writing elasticsearch.yml..."
   cat > /etc/elasticsearch/elasticsearch.yml << EOF
 cluster.name: siemba-cluster
@@ -113,13 +115,22 @@ network.host: 127.0.0.1
 http.port: 9200
 discovery.type: single-node
 xpack.security.enabled: false
+xpack.security.http.ssl.enabled: false
+xpack.security.transport.ssl.enabled: false
 bootstrap.memory_lock: false
 EOF
+
+  # Permissions Fix
+  log "Applying permission fixes..."
+  chown -R elasticsearch:elasticsearch /etc/elasticsearch /var/lib/elasticsearch /var/log/elasticsearch
 
   log "Starting service (patience required)..."
   systemctl daemon-reload
   systemctl enable elasticsearch
   systemctl restart elasticsearch || {
+    echo -e "${RED}Elasticsearch failed to boot.${NC}"
+    echo -e "Printing terminal lines from /var/log/elasticsearch/siemba-cluster.log:"
+    tail -n 20 /var/log/elasticsearch/siemba-cluster.log || true
     err "ES failed. Check logs: journalctl -u elasticsearch"
   }
 
@@ -135,25 +146,34 @@ EOF
   err "Elasticsearch is running but API timed out."
 }
 
-# ── Rest of the Stack ─────────────────────────────────────────────────────────
-
 install_kibana() {
-  step "Kibana 8.x"
+  step "Installing Kibana 8.x"
   q apt-get install -y kibana
+  
+  log "Writing kibana.yml..."
   cat > /etc/kibana/kibana.yml << EOF
 server.host: "127.0.0.1"
+server.port: 5601
 server.basePath: "/kibana"
 server.rewriteBasePath: true
 elasticsearch.hosts: ["http://127.0.0.1:9200"]
+logging.root.level: info
 EOF
-  systemctl enable kibana && systemctl restart kibana
+
+  chown -R kibana:kibana /etc/kibana /var/lib/kibana /var/log/kibana
+  systemctl daemon-reload
+  systemctl enable kibana
+  systemctl restart kibana
   log "Kibana: UP ✓"
 }
 
 install_siemba_ui() {
-  step "SIEMBA UI"
+  step "Deploying SIEMBA UI"
   mkdir -p "$INSTALL_DIR"
-  # Add your git clone / npm install logic here as seen in v1.0.2
+  if [ ! -d "$INSTALL_DIR/.git" ]; then
+    log "Cloning SIEMBA source code to $INSTALL_DIR..."
+    q git clone "$REPO" "$INSTALL_DIR"
+  fi
   log "SIEMBA UI logic deployed ✓"
 }
 
@@ -165,10 +185,10 @@ main() {
   system_tuning
   install_elasticsearch
   install_kibana
-  # Call other functions...
+  install_siemba_ui
   
   echo -e "\n${GREEN}✅ SIEMBA POC READY!${NC}"
-  echo -e "Access via: http://${DOMAIN}"
+  echo -e "Access domain config configured for: http://${DOMAIN}"
 }
 
 main "$@"
