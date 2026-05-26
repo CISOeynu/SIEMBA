@@ -21,6 +21,15 @@ SIEMBA combines enterprise SIEM log collection with active SOC tooling in a sing
 ---
 
 ## Quick Install
+## System Requirements
+
+| Resource | Minimum | Recommended |
+| :--- | :--- | :--- |
+| **RAM** | 8 GB | 16 GB+ |
+| **CPU** | 2 Cores | 4 Cores+ |
+| **Storage**| 40 GB SSD | 100 GB+ SSD (NVMe preferred for high EPS) |
+
+> ⚠️ **Note:** The automated installation script optimizes system variables (like `vm.max_map_count`) and dynamically creates a 4GB swap space to stabilize the Elasticsearch engine on machines with tight memory constraints (e.g., 8GB–12GB RAM).
 
 ### Ubuntu 22.04 / 24.04 — Full Native
 ```bash
