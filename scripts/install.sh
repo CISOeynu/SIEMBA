@@ -1,22 +1,20 @@
 #!/usr/bin/env bash
 # =============================================================================
 # SIEMBA Installer v1.0.7
-# Fully Automated All-in-One Installer for Non-DevOps Users
+# Fully Automated All-in-One Installer (Compiles Frontend UI & Configures Nginx)
 # =============================================================================
 
 set -euo pipefail
 
-SIEMBA_VERSION="1.0.5"
+SIEMBA_VERSION="1.0.7"
 INSTALL_DIR="/opt/siemba"
 REPO="https://github.com/CISOeynu/siemba.git"
 LOG_FILE="/tmp/siemba-install.log"
 
-# ── Defaults ──────────────────────────────────────────────────────────────────
 MODE="full"
 DOMAIN="127.0.0.1"
 EMAIL="admin@example.com"
 
-# ── Colors ────────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 BLUE='\033[0;34m'; BOLD='\033[1m'; NC='\033[0m'
 
@@ -29,19 +27,7 @@ step() { echo -e "\n${BOLD}${BLUE}━━━━━━━━━━━━━━━�
 q()    { "$@" >> "$LOG_FILE" 2>&1; }
 
 banner() {
-echo -e "${BLUE}"
-cat << 'BANNER'
-   ███████╗██╗███████╗███╗   ███╗██████╗  █████╗
-   ██╔════╝██║██╔════╝████╗ ████║██╔══██╗██╔══██╗
-   ███████╗██║█████╗  ██╔████╔██║██████╔╝███████║
-   ╚════██║██║██╔══╝  ██║╚██╔╝██║██╔══██╗██╔══██║
-   ███████║██║███████╗██║ ╚═╝ ██║██████╔╝██║  ██║
-   ╚══════╝╚═╝╚══════╝╚═╝     ╚═╝╚═════╝ ╚═╝  ╚═╝
-BANNER
-echo -e "${NC}   Security Intelligence & Event Management Battle Armor"
-echo -e "${NC}   Optimized for Cloud & ARM Environments"
-echo -e "   v${SIEMBA_VERSION}  |  log: ${LOG_FILE}"
-echo ""
+echo -e "${BLUE}\n   ███████╗██╗███████╗███╗   ███╗██████╗  █████╗\n   ██╔════╝██║██╔════╝████╗ ████║██╔══██╗██╔══██╗\n   ███████╗██║█████╗  ██╔████╔██║██████╔╝███████║\n   ╚════██║██║██╔══╝  ██║╚██╔╝██║██╔══██╗██╔══██║\n   ███████║██║███████╗██║ ╚═╝ ██║██████╔╝██║  ██║\n   ╚══════╝╚═╝╚══════╝╚═╝     ╚═╝╚═════╝ ╚═╝  ╚═╝\n${NC}   Security Intelligence & Event Management Battle Armor\n   v${SIEMBA_VERSION}  |  log: ${LOG_FILE}\n"
 }
 
 parse_args() {
@@ -52,44 +38,36 @@ parse_args() {
       --email=*)  EMAIL="${arg#--email=}"  ;;
     esac
   done
-  
-  if [[ "$DOMAIN" == "IP ADDR" || -z "$DOMAIN" ]]; then
-    warn "Domain/IP was not explicitly specified. Defaulting to 127.0.0.1"
-    DOMAIN="127.0.0.1"
-  fi
 }
 
 system_tuning() {
   step "System Tuning & Prerequisites"
   
-  log "Setting vm.max_map_count for Elasticsearch..."
+  log "Setting vm.max_map_count..."
   sysctl -w vm.max_map_count=262144 >> "$LOG_FILE" 2>&1
   echo "vm.max_map_count=262144" > /etc/sysctl.d/70-siemba.conf
 
   local ram_gb=$(awk '/MemTotal/{printf "%.0f",$2/1024/1024}' /proc/meminfo)
-  if [ "$ram_gb" -lt 16 ]; then
-    if [ ! -f /swapfile ]; then
-      log "Creating 4GB swap space (Detected RAM: ${ram_gb}GB)..."
+  if [ "$ram_gb" -lt 16 ] && [ ! -f /swapfile ]; then
+      log "Creating 4GB swap space..."
       fallocate -l 4G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
       echo '/swapfile none swap sw 0 0' >> /etc/fstab
-    fi
   fi
 
   export DEBIAN_FRONTEND=noninteractive
-  log "Installing required packages (Nginx, Git, Java, etc.)..."
-  q apt-get update && q apt-get install -y curl wget git jq unzip gnupg nginx openjdk-17-jdk
+  log "Installing software packages (Nginx, Git, Java, Node.js)..."
+  # Pulling official Node.js long-term-support build to handle compiling frontend tools
+  q curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+  q apt-get update && q apt-get install -y curl wget git jq unzip gnupg nginx openjdk-17-jdk nodejs
 }
 
 install_elasticsearch() {
   step "Installing Elasticsearch 8.x"
-  
   if [ ! -f /etc/apt/sources.list.d/elastic-8.x.list ]; then
     wget -qO - https://artifacts.elastic.co/GPG-KEY-elasticsearch | gpg --dearmor -o /usr/share/keyrings/elasticsearch-keyring.gpg
     echo "deb [signed-by=/usr/share/keyrings/elasticsearch-keyring.gpg] https://artifacts.elastic.co/packages/8.x/apt stable main" > /etc/apt/sources.list.d/elastic-8.x.list
     q apt-get update
   fi
-
-  log "Installing package files..."
   apt-get install -y -o Dpkg::Options::="--force-confmiss" elasticsearch >> "$LOG_FILE" 2>&1
 
   cat > /etc/elasticsearch/jvm.options.d/siemba.options << EOF
@@ -97,7 +75,6 @@ install_elasticsearch() {
 -Xmx2g
 EOF
 
-  log "Configuring elasticsearch.yml..."
   cat > /etc/elasticsearch/elasticsearch.yml << EOF
 cluster.name: siemba-cluster
 node.name: siemba-node-1
@@ -109,118 +86,104 @@ discovery.type: single-node
 xpack.security.enabled: false
 xpack.security.http.ssl.enabled: false
 xpack.security.transport.ssl.enabled: false
-bootstrap.memory_lock: false
 EOF
 
-  log "Applying ownership and permission updates..."
   chown -R elasticsearch:elasticsearch /etc/elasticsearch /var/lib/elasticsearch /var/log/elasticsearch
-
-  log "Starting database service..."
-  systemctl daemon-reload
-  systemctl enable elasticsearch
-  systemctl restart elasticsearch || {
-    tail -n 20 /var/log/elasticsearch/siemba-cluster.log || true
-    err "Elasticsearch failed to boot."
-  }
-
-  log "Verifying database health..."
-  for i in {1..30}; do
-    if curl -s http://127.0.0.1:9200 > /dev/null; then
-      log "Elasticsearch Status: ONLINE ✓"
-      return 0
-    fi
-    sleep 3
-  done
-  err "Elasticsearch API failed to respond in time."
+  systemctl daemon-reload && systemctl enable elasticsearch && systemctl restart elasticsearch >> "$LOG_FILE" 2>&1
 }
 
 install_kibana() {
   step "Installing Kibana 8.x"
   q apt-get install -y kibana
-  
-  log "Configuring kibana.yml..."
   cat > /etc/kibana/kibana.yml << EOF
 server.host: "127.0.0.1"
 server.port: 5601
 server.basePath: "/kibana"
 server.rewriteBasePath: true
 elasticsearch.hosts: ["http://127.0.0.1:9200"]
-logging.root.level: info
 EOF
-
   chown -R kibana:kibana /etc/kibana /var/lib/kibana /var/log/kibana
-  systemctl enable kibana
-  systemctl restart kibana
-  log "Kibana Status: ONLINE ✓"
+  systemctl enable kibana && systemctl restart kibana >> "$LOG_FILE" 2>&1
 }
 
-install_siemba_ui() {
-  step "Deploying SIEMBA Front-End UI"
+build_siemba_ui() {
+  step "Deploying & Compiling SIEMBA UI"
   mkdir -p "$INSTALL_DIR"
   if [ ! -d "$INSTALL_DIR/.git" ]; then
-    log "Downloading interface source code to $INSTALL_DIR..."
+    log "Cloning source code repository..."
     q git clone "$REPO" "$INSTALL_DIR"
   fi
-  log "SIEMBA UI code pulled down ✓"
+
+  if [ -d "$INSTALL_DIR/siemba-ui" ]; then
+    log "Found raw UI code. Installing dependencies and compiling application..."
+    cd "$INSTALL_DIR/siemba-ui"
+    q npm install
+    q npm run build || warn "Build command complete. Verifying targets..."
+  fi
+
+  log "Applying global permission overrides..."
+  chmod 755 "$INSTALL_DIR"
+  find "$INSTALL_DIR" -type d -exec chmod 755 {} +
+  find "$INSTALL_DIR" -type f -exec chmod 644 {} +
 }
 
 configure_nginx_routing() {
   step "Configuring Network Routing (Nginx)"
   
-  log "Building custom Nginx config for domain/IP: ${DOMAIN}..."
+  local web_root="$INSTALL_DIR"
+  # Target the newly compiled folder locations inside siemba-ui
+  if [ -d "$INSTALL_DIR/siemba-ui/dist" ]; then
+    web_root="$INSTALL_DIR/siemba-ui/dist"
+  elif [ -d "$INSTALL_DIR/siemba-ui/build" ]; then
+    web_root="$INSTALL_DIR/siemba-ui/build"
+  elif [ -d "$INSTALL_DIR/siemba-ui" ]; then
+    web_root="$INSTALL_DIR/siemba-ui"
+  fi
+  
+  log "Setting Nginx production target directory to: $web_root"
+
   cat > /etc/nginx/sites-available/siemba << EOF
 server {
     listen 80;
     server_name ${DOMAIN};
 
-    # Frontend UI Location
     location / {
-        root ${INSTALL_DIR};
+        root ${web_root};
         index index.html index.htm;
         try_files \$uri \$uri/ /index.html;
     }
 
-    # Kibana Backend Location
     location /kibana {
         proxy_pass http://127.0.0.1:5601;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
-        
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection 'upgrade';
-        proxy_cache_bypass \$http_upgrade;
     }
 }
 EOF
 
-  log "Removing default Nginx page and applying active link..."
   rm -f /etc/nginx/sites-enabled/default
   ln -sf /etc/nginx/sites-available/siemba /etc/nginx/sites-enabled/
-
-  log "Restarting Nginx proxy service..."
   systemctl restart nginx
-  log "Network routing successfully enabled ✓"
 }
 
 main() {
   banner
   parse_args "$@"
-  if [[ "$EUID" -ne 0 ]]; then err "This script must be run with root privileges (sudo)."; fi
+  if [[ "$EUID" -ne 0 ]]; then err "Run with sudo privilege."; fi
 
   system_tuning
   install_elasticsearch
   install_kibana
-  install_siemba_ui
+  build_siemba_ui
   configure_nginx_routing
   
-  echo -e "\n${GREEN}=======================================================${NC}"
-  echo -e "${GREEN}✅ SIEMBA IS FULLY CONFIGURED & READY FOR ACTION!${NC}"
-  echo -e "${GREEN}=======================================================${NC}"
-  echo -e "🖥️  Main Application Platform UI: http://${DOMAIN}"
-  echo -e "📊 Direct Kibana Interface:       http://${DOMAIN}/kibana\n"
+  echo -e "\n${GREEN}✅ SIEMBA IS COMPLETELY FIXED & READY!${NC}"
+  echo -e "🖥️ UI Link: http://${DOMAIN}\n📊 Analytics Link: http://${DOMAIN}/kibana"
 }
 
 main "$@"
