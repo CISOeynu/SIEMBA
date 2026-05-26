@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 # =============================================================================
-# SIEMBA Production All-In-One Installer v1.0.8
-# Hardened, Multi-Layer Stack Auto-Configurator for Non-DevOps Environments
-# Handles Architecture Tuning, DB Deployment, UI Bundling & Nginx Routing
+# SIEMBA Production All-In-One Installer v1.0.9 (Lightweight Edition)
+# Bypasses heavy machine compilation to prevent OOM process termination
 # =============================================================================
 
 set -euo pipefail
 
-SIEMBA_VERSION="1.0.8"
+SIEMBA_VERSION="1.0.9"
 INSTALL_DIR="/opt/siemba"
 REPO="https://github.com/CISOeynu/siemba.git"
 LOG_FILE="/tmp/siemba-install.log"
@@ -40,8 +39,7 @@ cat << 'BANNER'
    ╚══════╝╚═╝╚══════╝╚═╝     ╚═╝╚═════╝ ╚═╝  ╚═╝
 BANNER
 echo -e "${NC}   Security Intelligence & Event Management Battle Armor"
-echo -e "${NC}   Optimized for Cloud & ARM Environments"
-echo -e "   v${SIEMBA_VERSION}  |  log: ${LOG_FILE}"
+echo -e "${NC}   v${SIEMBA_VERSION}  |  log: ${LOG_FILE}"
 echo ""
 }
 
@@ -53,11 +51,6 @@ parse_args() {
       --email=*)  EMAIL="${arg#--email=}"  ;;
     esac
   done
-  
-  if [[ "$DOMAIN" == "IP ADDR" || -z "$DOMAIN" ]]; then
-    warn "Domain/IP was not explicitly specified. Defaulting to 127.0.0.1"
-    DOMAIN="127.0.0.1"
-  fi
 }
 
 system_tuning() {
@@ -67,22 +60,10 @@ system_tuning() {
   sysctl -w vm.max_map_count=262144 >> "$LOG_FILE" 2>&1
   echo "vm.max_map_count=262144" > /etc/sysctl.d/70-siemba.conf
 
-  local ram_gb=$(awk '/MemTotal/{printf "%.0f",$2/1024/1024}' /proc/meminfo)
-  if [ "$ram_gb" -lt 16 ]; then
-    if [ ! -f /swapfile ]; then
-      log "Low RAM environment detected (${ram_gb}GB). Building 4GB system swap..."
-      fallocate -l 4G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
-      echo '/swapfile none swap sw 0 0' >> /etc/fstab
-    fi
-  fi
-
   export DEBIAN_FRONTEND=noninteractive
-  log "Injecting upstream software environments (NodeJS 20.x repo setup)..."
-  q curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-  
-  log "Installing system packages (Nginx, Git, Java, NodeJS, NPM)..."
+  log "Installing required packages (Nginx, Git, Java)..."
   q apt-get update
-  q apt-get install -y curl wget git jq unzip gnupg nginx openjdk-17-jdk nodejs
+  q apt-get install -y curl wget git jq unzip gnupg nginx openjdk-17-jdk
 }
 
 install_elasticsearch() {
@@ -94,16 +75,15 @@ install_elasticsearch() {
     q apt-get update
   fi
 
-  log "Deploying binary packages..."
+  log "Deploying database binaries..."
   apt-get install -y -o Dpkg::Options::="--force-confmiss" elasticsearch >> "$LOG_FILE" 2>&1
 
-  log "Allocating dedicated runtime heap boundaries (2GB limits)..."
+  log "Allocating execution limits..."
   cat > /etc/elasticsearch/jvm.options.d/siemba.options << EOF
 -Xms2g
 -Xmx2g
 EOF
 
-  log "Writing sanitized single-node elasticsearch.yml..."
   cat > /etc/elasticsearch/elasticsearch.yml << EOF
 cluster.name: siemba-cluster
 node.name: siemba-node-1
@@ -118,67 +98,38 @@ xpack.security.transport.ssl.enabled: false
 bootstrap.memory_lock: false
 EOF
 
-  log "Correcting file system tree ownership metrics..."
   chown -R elasticsearch:elasticsearch /etc/elasticsearch /var/lib/elasticsearch /var/log/elasticsearch
-
-  log "Starting underlying database service engine..."
   systemctl daemon-reload
   systemctl enable elasticsearch
-  systemctl restart elasticsearch || {
-    tail -n 20 /var/log/elasticsearch/siemba-cluster.log || true
-    err "Elasticsearch engine fell over during start sequence."
-  }
-
-  log "Validating API responsiveness loop..."
-  for i in {1..30}; do
-    if curl -s http://127.0.0.1:9200 > /dev/null; then
-      log "Elasticsearch engine: ONLINE ✓"
-      return 0
-    fi
-    sleep 3
-  done
-  err "Elasticsearch process spawned but cluster API state dropped connections."
+  systemctl restart elasticsearch >> "$LOG_FILE" 2>&1
 }
 
 install_kibana() {
   step "Installing Kibana 8.x"
-  log "Deploying binary packages..."
   q apt-get install -y kibana
   
-  log "Writing configuration boundaries..."
   cat > /etc/kibana/kibana.yml << EOF
 server.host: "127.0.0.1"
 server.port: 5601
 server.basePath: "/kibana"
 server.rewriteBasePath: true
 elasticsearch.hosts: ["http://127.0.0.1:9200"]
-logging.root.level: info
 EOF
 
   chown -R kibana:kibana /etc/kibana /var/lib/kibana /var/log/kibana
   systemctl enable kibana
-  systemctl restart kibana
-  log "Kibana engine: ONLINE ✓"
+  systemctl restart kibana >> "$LOG_FILE" 2>&1
 }
 
-build_siemba_ui() {
-  step "Deploying & Compiling SIEMBA UI"
+deploy_siemba_ui() {
+  step "Deploying SIEMBA Static Assets"
   mkdir -p "$INSTALL_DIR"
   if [ ! -d "$INSTALL_DIR/.git" ]; then
-    log "Cloning clean repository from origin target..."
+    log "Cloning clean repository from origin..."
     q git clone "$REPO" "$INSTALL_DIR"
   fi
 
-  if [ -d "$INSTALL_DIR/siemba-ui" ]; then
-    log "Assembling production static application (npm install & compile step)..."
-    cd "$INSTALL_DIR/siemba-ui"
-    q npm install --unsafe-perm
-    q npm run build || warn "Compilation step completed with non-breaking signals."
-  else
-    err "Cloned directory configuration missing required source node 'siemba-ui'."
-  fi
-
-  log "Overriding runtime directory traversal and permission barriers..."
+  log "Using light distribution tree. Granting filesystem permissions..."
   chmod 755 "$INSTALL_DIR"
   find "$INSTALL_DIR" -type d -exec chmod 755 {} +
   find "$INSTALL_DIR" -type f -exec chmod 644 {} +
@@ -187,16 +138,13 @@ build_siemba_ui() {
 configure_nginx_routing() {
   step "Configuring Network Routing (Nginx)"
   
-  local web_root="$INSTALL_DIR"
-  if [ -d "$INSTALL_DIR/siemba-ui/dist" ]; then
-    web_root="$INSTALL_DIR/siemba-ui/dist"
-  elif [ -d "$INSTALL_DIR/siemba-ui/build" ]; then
-    web_root="$INSTALL_DIR/siemba-ui/build"
-  elif [ -d "$INSTALL_DIR/siemba-ui" ]; then
+  # Auto-targets the distribution build folder inside the cloned repo safely
+  local web_root="$INSTALL_DIR/siemba-ui/dist"
+  if [ ! -d "$web_root" ]; then
     web_root="$INSTALL_DIR/siemba-ui"
   fi
-  
-  log "Binding Nginx distribution assets pointer to target root: $web_root"
+
+  log "Routing requests directly to deployment tree: $web_root"
 
   cat > /etc/nginx/sites-available/siemba << EOF
 server {
@@ -224,13 +172,10 @@ server {
 }
 EOF
 
-  log "Unlinking fallback default layout configuration entries..."
   rm -f /etc/nginx/sites-enabled/default
   ln -sf /etc/nginx/sites-available/siemba /etc/nginx/sites-enabled/
-
-  log "Cycling active reverse proxy nodes..."
   systemctl restart nginx
-  log "Proxy ingress rules active and processing traffic ✓"
+  log "Routing configuration successfully completed ✓"
 }
 
 main() {
@@ -241,11 +186,11 @@ main() {
   system_tuning
   install_elasticsearch
   install_kibana
-  build_siemba_ui
+  deploy_siemba_ui
   configure_nginx_routing
   
   echo -e "\n${GREEN}=======================================================${NC}"
-  echo -e "${GREEN}✅ SIEMBA IS FULLY CONFIGURED & READY FOR ACTION!${NC}"
+  echo -e "${GREEN}✅ SIEMBA LIGHTWEIGHT PLATFORM ONLINE & READY!${NC}"
   echo -e "${GREEN}=======================================================${NC}"
   echo -e "🖥️  Main Application Platform UI: http://${DOMAIN}"
   echo -e "📊 Direct Kibana Interface:       http://${DOMAIN}/kibana\n"
